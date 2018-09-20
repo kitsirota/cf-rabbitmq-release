@@ -35,15 +35,21 @@ main(){
 
   cluster_args=$(create_cluster_args "${RABBITMQ_NODES_STRING}" "${DISK_ALARM_THRESHOLD}" "${CLUSTER_PARTITION_HANDLING}" "${HTTP_ACCESS_LOG_DIR}")
   load_definitions=$(configure_load_definitions "${LOAD_DEFINITIONS}" "${script_dir}")
-  tls_listeners=$(configure_tls_listeners "${SSL_KEY}")
-  tls_options=$(configure_tls_options "${SSL_KEY}" \
-    "${SSL_VERIFY}" \
-    "${SSL_VERIFICATION_DEPTH}" \
-    "${SSL_FAIL_IF_NO_PEER_CERT}" \
-    "${SSL_SUPPORTED_TLS_VERSIONS}" \
-    "${SSL_SUPPORTED_TLS_CIPHERS}" \
-    "${script_dir}" \
-  )
+
+  if ${SSL_ENABLED:?must be set}
+  then
+    tls_listeners=$(configure_tls_listeners)
+    tls_options=$(configure_tls_options \
+      "${SSL_VERIFY}" \
+      "${SSL_VERIFICATION_DEPTH}" \
+      "${SSL_FAIL_IF_NO_PEER_CERT}" \
+      "${SSL_SUPPORTED_TLS_VERSIONS}" \
+      "${SSL_SUPPORTED_TLS_CIPHERS}" \
+      "${script_dir}" \
+    )
+  fi
+
+  management_options=$(configure_management_listener "$SSL_ENABLED_ON_MANAGEMENT" "${script_dir}")
 
   server_start_args="$(
     echo \
@@ -51,6 +57,7 @@ main(){
       ${load_definitions} \
       ${tls_listeners} \
       ${tls_options} \
+      ${management_options} \
     | escape_for_singlequoted_string
   )"
 
@@ -112,19 +119,25 @@ configure_load_definitions() {
 }
 
 configure_tls_listeners() {
-  local ssl_key
+  # if TLS is enabled, disable the non-TLS listener for AMQP
+  echo "-rabbit tcp_listeners [] -rabbit ssl_listeners [5671] -rabbitmq_mqtt ssl_listeners [8883] -rabbitmq_stomp ssl_listeners [61614]"
+}
 
-  ssl_key="$1"
+configure_management_listener() {
+  local ssl_enabled_on_management
+  local script_dir
+  ssl_enabled_on_management="$1"
+  script_dir="$2"
 
-  if [[ ! -z "${ssl_key}" ]]; then
-    # if TLS is enabled, disable the non-TLS listener for AMQP 0-9-1 and make the management/HTTP API
-    # listener use TLS.
-    echo "-rabbit tcp_listeners [] -rabbit ssl_listeners [5671] -rabbitmq_management listener [{port,15672},{ssl,false}] -rabbitmq_mqtt ssl_listeners [8883] -rabbitmq_stomp ssl_listeners [61614]"
+  if ${ssl_enabled_on_management:?must be set}
+  then
+    echo "-rabbitmq_management listener [{port,15671},{ssl,true},{ssl_opts,[{cacertfile,\"${script_dir}/../etc/management-cacert.pem\"},{certfile,\"${script_dir}/../etc/management-cert.pem\"},{keyfile,\"${script_dir}/../etc/management-key.pem\"}]}]"
+  else
+    echo "-rabbitmq_management listener [{port,15672},{ssl,false}]"
   fi
 }
 
 configure_tls_options() {
-  local ssl_key
   local ssl_verify
   local ssl_verification_mode
   local ssl_verification_depth
@@ -134,25 +147,22 @@ configure_tls_options() {
   local ssl_supported_tls_ciphers
   local ssl_options
 
-  ssl_key="$1"
-  ssl_verify="$2"
-  ssl_verification_depth="$3"
-  ssl_fail_if_no_peer_cert="$4"
-  ssl_supported_tls_versions="$5"
-  ssl_supported_tls_ciphers="$6"
-  script_dir="$7"
+  ssl_verify="$1"
+  ssl_verification_depth="$2"
+  ssl_fail_if_no_peer_cert="$3"
+  ssl_supported_tls_versions="$4"
+  ssl_supported_tls_ciphers="$5"
+  script_dir="$6"
 
-  if [[ ! -z "${ssl_key}" ]]; then
-    ssl_verification_mode='verify_none'
-    if [[ $ssl_verify = true ]]; then
-      ssl_verification_mode='verify_peer'
-    fi
-
-    # concatenate options encoded in double quotes, see the concatenation comment above.
-    # {versions,['tlsv1.2','tlsv1.1',tlsv1]} disables SSLv3 to mitigate the POODLE attack.
-    ssl_options=" -rabbit ssl_options [{cacertfile,\"${script_dir}/../etc/cacert.pem\"},{certfile,\"${script_dir}/../etc/cert.pem\"},{keyfile,\"${script_dir}/../etc/key.pem\"},{verify,$ssl_verification_mode},{depth,$ssl_verification_depth},{fail_if_no_peer_cert,$ssl_fail_if_no_peer_cert},{versions,$ssl_supported_tls_versions}${ssl_supported_tls_ciphers}]"
-    echo "${ssl_options}"
+  ssl_verification_mode='verify_none'
+  if [[ $ssl_verify = true ]]; then
+    ssl_verification_mode='verify_peer'
   fi
+
+  # concatenate options encoded in double quotes, see the concatenation comment above.
+  # {versions,['tlsv1.2','tlsv1.1',tlsv1]} disables SSLv3 to mitigate the POODLE attack.
+  ssl_options=" -rabbit ssl_options [{cacertfile,\"${script_dir}/../etc/cacert.pem\"},{certfile,\"${script_dir}/../etc/cert.pem\"},{keyfile,\"${script_dir}/../etc/key.pem\"},{verify,$ssl_verification_mode},{depth,$ssl_verification_depth},{fail_if_no_peer_cert,$ssl_fail_if_no_peer_cert},{versions,$ssl_supported_tls_versions}${ssl_supported_tls_ciphers}]"
+  echo "${ssl_options}"
 }
 
 escape_for_singlequoted_string() {
@@ -224,7 +234,7 @@ create_erlang_cookie() {
   user="$4"
   group="$5"
 
-  printf "${erlang_cookie}" > "${dir}/.erlang.cookie"
+  echo -n "${erlang_cookie}" > "${dir}/.erlang.cookie"
   chown ${user}:${group} ${dir}/.erlang.cookie
   chmod 0400 ${dir}/.erlang.cookie
   cp -a "${dir}/.erlang.cookie" ${home}

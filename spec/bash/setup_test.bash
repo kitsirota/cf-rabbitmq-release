@@ -14,7 +14,6 @@ export T_fail
 
 T_setup_environment() {
   (
-
     local env
 
     DIR="$(mktemp -d)"
@@ -28,12 +27,13 @@ T_setup_environment() {
     RABBITMQ_NODES_STRING="node-1,node-2"
     LOAD_DEFINITIONS="my-definitions"
 
-    SSL_KEY="ssk-key"
+    SSL_ENABLED=true
     SSL_VERIFY=false
     SSL_VERIFICATION_DEPTH="5"
     SSL_FAIL_IF_NO_PEER_CERT=true
     SSL_SUPPORTED_TLS_VERSIONS="['tlsv1.2','tlsv1.1']"
     SSL_SUPPORTED_TLS_CIPHERS=",{ciphers, ['cipher1','cipher2']}"
+    SSL_ENABLED_ON_MANAGEMENT=true
 
     ERLANG_COOKIE="my-awesome-cookie"
     VCAP_USER="$(id -u)"
@@ -66,7 +66,7 @@ T_setup_environment() {
     expect_to_contain "$env" "{verify,verify_none},"
 
     # SSL
-    expect_to_contain "$env" " -rabbitmq_management listener [{port,15672},{ssl,false}]"
+    expect_to_contain "$env" " -rabbitmq_management listener [{port,15671},{ssl,true}"
     expect_to_contain "$env" " -rabbitmq_mqtt ssl_listeners [8883]"
     expect_to_contain "$env" " -rabbitmq_stomp ssl_listeners [61614]"
     expect_to_contain "$env" " -rabbit ssl_options [{cacertfile,"
@@ -124,23 +124,50 @@ T_configure_load_definitions() {
   ) || $T_fail "Failed to load definitions"
 }
 
+T_do_not_configure_tls_listeners() {
+  (
+    local env
+    DIR="$(mktemp -d)"
+    trap "rm -rf ${DIR}" EXIT
+    trap "rm -rf ${VCAP_HOME}" EXIT
+    SSL_ENABLED=false
+    SSL_ENABLED_ON_MANAGEMENT=false
+    UPGRADE_PREPARATION_NODES_FILE="$(mktemp)"
+    trap "rm -rf ${UPGRADE_PREPARATION_NODES_FILE}" EXIT
+
+    main
+
+    env="$(<$DIR/env)"
+    expect_file_to_exist "${DIR}/env"
+    expect_to_not_contain "$env" " -rabbit tcp_listeners []"
+    expect_to_not_contain "$env" " -rabbit ssl_listeners [5671]"
+    expect_to_not_contain "$env" "{verify,verify_none},"
+    expect_to_not_contain "$env" " -rabbitmq_management listener [{port,15672},{ssl,false}]"
+    expect_to_not_contain "$env" " -rabbitmq_mqtt ssl_listeners [8883]"
+    expect_to_not_contain "$env" " -rabbitmq_stomp ssl_listeners [61614]"
+    expect_to_not_contain "$env" " -rabbit ssl_options [{cacertfile,"
+    expect_to_not_contain "$env" "{certfile,"
+    expect_to_not_contain "$env" "{keyfile,"
+    expect_to_not_contain "$env" "{verify,verify_none},"
+    expect_to_not_contain "$env" "{depth,5},"
+    expect_to_not_contain "$env" "{fail_if_no_peer_cert,true},"
+    expect_to_not_contain "$env" "{versions,['\"'\"'tlsv1.2'\"'\"','\"'\"'tlsv1.1'\"'\"']}"
+    expect_to_not_contain "$env" "{ciphers, ['\"'\"'cipher1'\"'\"','\"'\"'cipher2'\"'\"']}"
+  ) || $T_fail "Failed to configure without TLS listeners"
+}
+
 T_configure_tls_listeners() {
   (
-    local ssl_key listeners
+    listeners="$(configure_tls_listeners)"
 
-    ssl_key="--this is my key--"
-
-    listeners="$(configure_tls_listeners \"$ssl_key\")"
-    expect_to_equal "$listeners" "-rabbit tcp_listeners [] -rabbit ssl_listeners [5671] -rabbitmq_management listener [{port,15672},{ssl,false}] -rabbitmq_mqtt ssl_listeners [8883] -rabbitmq_stomp ssl_listeners [61614]"
-
+    expect_to_equal "$listeners" "-rabbit tcp_listeners [] -rabbit ssl_listeners [5671] -rabbitmq_mqtt ssl_listeners [8883] -rabbitmq_stomp ssl_listeners [61614]"
   ) || $T_fail "Failed to configure TLS listeners"
 }
 
 T_configure_tls_options() {
   (
-    local ssl_key ssl_verify ssl_verification_mode ssl_verification_depth script_dir ssl_fail_if_no_peer_cert ssl_supported_tls_versions ssl_options options
+    local ssl_verify ssl_verification_mode ssl_verification_depth script_dir ssl_fail_if_no_peer_cert ssl_supported_tls_versions ssl_options options
 
-    ssl_key="--this is my key--"
     ssl_verify="true"
     ssl_verification_depth="5"
     ssl_fail_if_no_peer_cert=true
@@ -148,7 +175,7 @@ T_configure_tls_options() {
     script_dir="/path/to/script/dir"
     ssl_supported_tls_ciphers=",{ciphers, ['DHE_AES128_GCM_SHA256','DHE_AES256_GCM_SHA256']}"
 
-    options="$(configure_tls_options "${ssl_key}" "${ssl_verify}" "${ssl_verification_depth}" "${ssl_fail_if_no_peer_cert}" "${ssl_supported_tls_versions}" "${ssl_supported_tls_ciphers}" "${script_dir}")"
+    options="$(configure_tls_options "${ssl_verify}" "${ssl_verification_depth}" "${ssl_fail_if_no_peer_cert}" "${ssl_supported_tls_versions}" "${ssl_supported_tls_ciphers}" "${script_dir}")"
     expect_to_equal "$options" " -rabbit ssl_options [{cacertfile,\"${script_dir}/../etc/cacert.pem\"},{certfile,\"${script_dir}/../etc/cert.pem\"},{keyfile,\"${script_dir}/../etc/key.pem\"},{verify,verify_peer},{depth,$ssl_verification_depth},{fail_if_no_peer_cert,$ssl_fail_if_no_peer_cert},{versions,$ssl_supported_tls_versions}$ssl_supported_tls_ciphers]"
 
   ) || $T_fail "Failed to configure TLS options"
@@ -228,4 +255,20 @@ T_create_erlang_cookie() {
     expect_to_equal "$(<$dir/.erlang.cookie)" "$erlang_cookie"
 
   ) || $T_fail "Failed to create erlang cookie"
+}
+
+T_configure_management_listener_tls() {
+  (
+    listeners="$(configure_management_listener "true" "fake_path")"
+
+    expect_to_equal "$listeners" "-rabbitmq_management listener [{port,15671},{ssl,true},{ssl_opts,[{cacertfile,\"fake_path/../etc/management-cacert.pem\"},{certfile,\"fake_path/../etc/management-cert.pem\"},{keyfile,\"fake_path/../etc/management-key.pem\"}]}]"
+  ) || $T_fail "Failed to configure management listener for TLS"
+}
+
+T_configure_management_listener_no_tls() {
+  (
+    listeners="$(configure_management_listener "false" "fake_path")"
+
+    expect_to_equal "$listeners" "-rabbitmq_management listener [{port,15672},{ssl,false}]"
+  ) || $T_fail "Failed to configure management listener for no TLS"
 }
